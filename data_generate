@@ -1,0 +1,10 @@
+import pandas_datareader.data as pdr
+import yfinance as yf
+yf.pdr_override()
+
+# 读取标普500
+data = yf.download("BTC-USD", start="2020-08-01", end="2021-08-01", proxy="http://127.0.0.1:7890")
+# 查看数据前5行
+data.head()
+# 输出数据
+data.to_csv('BTC-USD(2020_8_1~2021_8_1).csv')
