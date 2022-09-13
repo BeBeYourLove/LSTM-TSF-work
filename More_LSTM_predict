@@ -1,0 +1,214 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+import torch
+import torch.nn as nn
+import time
+import seaborn as sns
+import math, time
+from sklearn.metrics import mean_squared_error
+import plotly.express as px
+import plotly.graph_objects as go
+
+data = pd.read_csv('BTC-USD(2019_8_1~2020_8_1).csv')
+data = data.sort_values('Date')
+
+price = pd.DataFrame(data[['High', 'Low', 'Open', 'Close']])
+
+# 特征缩放
+scaler = MinMaxScaler(feature_range=(-1, 1))
+price['xClose'] = scaler.fit_transform(price['Close'].values.reshape(-1, 1))
+price['xOpen'] = scaler.fit_transform(price['Open'].values.reshape(-1, 1))
+price['xHigh'] = scaler.fit_transform(price['High'].values.reshape(-1, 1))
+price['xLow'] = scaler.fit_transform(price['Low'].values.reshape(-1, 1))
+
+price = price.drop('Close', axis=1)
+price = price.drop('Open', axis=1)
+price = price.drop('High', axis=1)
+price = price.drop('Low', axis=1)
+
+'''制作训练的数据集'''
+def split_data(stock, lookback):
+    data_raw = stock.to_numpy()
+    data = []
+
+    # 进行数据的划分
+    for index in range(len(data_raw)-lookback):
+        data.append(data_raw[index:index+lookback])
+
+    data = np.array(data)
+    test_set_size = int(np.round(0.2*data.shape[0]))
+    train_set_size = data.shape[0]-test_set_size
+
+    x_train = data[:train_set_size, :-1, :]
+    y_train = data[:train_set_size, -1, 0]
+
+    x_test = data[train_set_size:, :-1, :]
+    y_test = data[train_set_size:, -1, 0]
+
+    return x_train, y_train, x_test, y_test
+
+lookback = 20
+x_train, y_train, x_test, y_test = split_data(price, lookback)
+# print('x_train.shape:', x_train.shape)
+# print('y_train.shape:', y_train.shape)
+# print('x_test.shape:', x_test.shape)
+# print('y_test.shape:', y_test.shape)
+
+
+# 构建LSTM模型
+x_train = torch.from_numpy(x_train).type(torch.Tensor)
+x_test = torch.from_numpy(x_test).type(torch.Tensor)
+y_train_lstm = torch.from_numpy(y_train).type(torch.Tensor)
+y_train_gru = torch.from_numpy(y_train).type(torch.Tensor)
+y_test_lstm = torch.from_numpy(y_test).type(torch.Tensor)
+y_test_gru = torch.from_numpy(y_test).type(torch.Tensor)
+
+y_train_lstm = y_train_lstm.unsqueeze(-1)
+y_test_lstm = y_test_lstm.unsqueeze(-1)
+
+input_dim = 4
+hidden_dim = 32
+num_layers = 2
+output_dim = 1
+epochs = 100
+dropout = 0.2
+
+class LSTM(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_layers, output_dim, dropout):
+        super(LSTM, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+
+        self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True, dropout=dropout)
+        self.fc = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, x):
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_dim).requires_grad_()
+        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_dim).requires_grad_()
+        out, (hn, cn) = self.lstm(x, (h0.detach(), c0.detach()))
+        # print("hn的shape:", hn.shape)
+        # print("cn的shape:", cn.shape)
+        # print("out的shape:", out.shape)
+        out = self.fc(out[:, -1, :])
+        return out
+
+model = LSTM(input_dim=input_dim, hidden_dim=hidden_dim, num_layers=num_layers, output_dim=output_dim, dropout=dropout)
+criterion = torch.nn.MSELoss()
+optimiser = torch.optim.Adam(model.parameters(), lr=0.01)
+
+hist = np.zeros(epochs)
+start_time = time.time()
+lstm = []
+
+for t in range(epochs):
+    # print(x_train.shape)
+    y_train_pred = model(x_train)
+
+    loss = criterion(y_train_pred, y_train_lstm)
+    print("Epoch", t, "MSELoss", loss.item())
+    hist[t] = loss.item()
+
+    optimiser.zero_grad()
+    loss.backward()
+    optimiser.step()
+
+training_time = time.time() - start_time
+print("Training time: {}".format(training_time))
+
+predict = pd.DataFrame(scaler.inverse_transform(y_train_pred.detach().numpy()))
+original = pd.DataFrame(scaler.inverse_transform(y_train_lstm.detach().numpy()))
+
+fig = plt.figure()
+fig.subplots_adjust(hspace=0.2, wspace=0.2)
+
+plt.subplot(1, 2, 1)
+ax = sns.lineplot(x=original.index, y=original[0], label="Data", color='royalblue')
+ax = sns.lineplot(x=predict.index, y=predict[0], label="Training Prediction (LSTM)", color='tomato')
+ax.set_title('Stock price', size=14, fontweight='bold')
+ax.set_xlabel('Days', size=14)
+ax.set_ylabel('Cost (USD)', size=14)
+ax.set_xticklabels('', size=10)
+
+plt.subplot(1, 2, 2)
+ax = sns.lineplot(data=hist, color='royalblue')
+ax.set_xlabel("Epoch", size=14)
+ax.set_ylabel("Loss", size=14)
+ax.set_title("Training Loss", size=14, fontweight='bold')
+fig.set_figheight(6)
+fig.set_figwidth(16)
+
+plt.show()
+
+y_test_pred = model(x_test)
+
+# tensor.detach() 1）复制源张量的内容，源张量改变复制的内容也会跟着改变他们是共享数据的
+#                 2）该复制的张量不会跟随学习
+y_train_pred = scaler.inverse_transform(y_train_pred.detach().numpy())
+y_train = scaler.inverse_transform(y_train_lstm.detach().numpy())
+y_test_pred = scaler.inverse_transform(y_test_pred.detach().numpy())
+y_test = scaler.inverse_transform(y_test_lstm.detach().numpy())
+
+trainScore = math.sqrt(mean_squared_error(y_train[:, 0], y_train_pred[:, 0]))
+print('Train Score: %.2f RMSE' % (trainScore))
+testScore = math.sqrt(mean_squared_error(y_test[:, 0], y_test_pred[:, 0]))
+print('Test Score: %.2f RMSE' % (testScore))
+
+trainPredictPlot = np.empty_like(price.loc[:, ['xClose']])
+trainPredictPlot[:, :] = np.nan
+trainPredictPlot[lookback:len(y_train_pred)+lookback, :] = y_train_pred
+
+testPredictPlot = np.empty_like(price.loc[:, ['xClose']])
+testPredictPlot[:, :] = np.nan
+testPredictPlot[len(y_train_pred)+lookback-1:len(price)-1, :] = y_test_pred
+
+original = scaler.inverse_transform(price.loc[:, ['xClose']].values.reshape(-1, 1))
+
+predictions = np.append(trainPredictPlot, testPredictPlot, axis=1)
+predictions = np.append(predictions, original, axis=1)
+result = pd.DataFrame(predictions)
+
+fig = go.Figure()
+fig.add_trace(go.Scatter(go.Scatter(x=result.index, y=result[0], mode='lines', name='Train prediction')))
+fig.add_trace(go.Scatter(x=result.index, y=result[1], mode='lines', name='Test prediction'))
+fig.add_trace(go.Scatter(go.Scatter(x=result.index, y=result[2], mode='lines', name='Actual Value')))
+
+fig.update_layout(
+    xaxis=dict(
+        showline=True,
+        showgrid=True,
+        showticklabels=False,
+        linecolor='white',
+        linewidth=2
+    ),
+    yaxis=dict(
+        title_text='Close (USD)',
+        titlefont=dict(
+            family='Rockwell',
+            size=12,
+            color='white'
+        ),
+        showline=True,
+        showgrid=True,
+        showticklabels=True,
+        linecolor='white',
+        linewidth=2,
+        ticks='outside',
+        tickfont=dict(
+            family='Rockwell',
+            size=12,
+            color='white'
+        ),
+    ),
+    showlegend=True,
+    template='plotly_dark'
+)
+
+annotations=[]
+annotations.append(dict(xref='paper', yref='paper', x=0.0, y=1.05,
+                        xanchor='left', yanchor='bottom',
+                        text='Results (LSTM)', font=dict(family='Rockwell', size=26, color='white'), showarrow=False))
+fig.update_layout(annotations=annotations)
+fig.show()
+
